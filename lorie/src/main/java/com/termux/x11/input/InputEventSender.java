@@ -202,6 +202,19 @@ public final class InputEventSender {
      * key-events or text-events. This contains some logic for handling some special keys, and
      * avoids sending a key-up event for a key that was previously injected as a text-event.
      */
+    // PoC state is separate from IME/text-key tracking and scoped per device.
+    private final Set<Long> hardwarePrintableKeys = new TreeSet<>();
+
+    private static boolean isHardwareKeyboardEvent(KeyEvent e) {
+        InputDevice d = e.getDevice();
+        return e.getDeviceId() >= 0 && d != null && !d.isVirtual()
+                && d.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC
+                && d.supportsSource(InputDevice.SOURCE_KEYBOARD)
+                && e.isFromSource(InputDevice.SOURCE_KEYBOARD)
+                && (e.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0
+                && (e.getAction() == ACTION_DOWN || e.getAction() == ACTION_UP);
+    }
+
     public boolean sendKeyEvent(KeyEvent e) {
         int keyCode = e.getKeyCode();
         boolean pressed = e.getAction() == KeyEvent.ACTION_DOWN;
@@ -238,6 +251,30 @@ public final class InputEventSender {
         // want to send it as KeyEvent.
         char unicode = keyCode != KEYCODE_ENTER ? (char) e.getUnicodeChar() : 0;
         int scancode = (preferScancodes || !no_modifiers) ? e.getScanCode(): 0;
+
+        // Do not convert real hardware printable events into text. Keep the
+        // Android keyCode meaning, not the raw scan code. Track the lifetime
+        // so an UP with changed modifiers / Unicode value still matches DOWN.
+        // ACTION_MULTIPLE and software/virtual/unknown sources stay unchanged.
+        if (!preferScancodes && isHardwareKeyboardEvent(e)) {
+            long identity = ((long) e.getDeviceId() << 32) | (keyCode & 0xffffffffL);
+            boolean held = hardwarePrintableKeys.contains(identity);
+            if (held || (pressed && unicode != 0 && keyCode != KEYCODE_UNKNOWN)) {
+                boolean repeat = pressed && held && e.getRepeatCount() > 0;
+                android.util.Log.i("F2BHardwarePoC", "device=" + e.getDeviceId()
+                        + " keyCode=" + keyCode + " scanCode=" + e.getScanCode()
+                        + " action=" + e.getAction() + " repeatCount=" + e.getRepeatCount()
+                        + " downTime=" + e.getDownTime() + " eventTime=" + e.getEventTime()
+                        + " suppressed=" + repeat + " route=hardware-keycode");
+                if (repeat)
+                    return true;
+                if (pressed)
+                    hardwarePrintableKeys.add(identity);
+                else
+                    hardwarePrintableKeys.remove(identity);
+                return mInjector.sendKeyEvent(0, keyCode, pressed);
+            }
+        }
 
         if (!preferScancodes) {
             if (pressed && unicode != 0 && no_modifiers) {
