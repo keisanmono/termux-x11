@@ -212,7 +212,7 @@ public final class InputEventSender {
                 && d.supportsSource(InputDevice.SOURCE_KEYBOARD)
                 && e.isFromSource(InputDevice.SOURCE_KEYBOARD)
                 && (e.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) == 0
-                && (e.getAction() == ACTION_DOWN || e.getAction() == ACTION_UP);
+                && (e.getAction() == KeyEvent.ACTION_DOWN || e.getAction() == KeyEvent.ACTION_UP);
     }
 
     public boolean sendKeyEvent(KeyEvent e) {
