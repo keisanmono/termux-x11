@@ -4,4 +4,6 @@ package com.termux.x11;
 interface ICmdEntryInterface {
     ParcelFileDescriptor getXConnection();
     ParcelFileDescriptor getLogcatOutput();
+    // Both the Activity and server must come from a build supporting this channel.
+    ParcelFileDescriptor getFocusEventFd();
 }

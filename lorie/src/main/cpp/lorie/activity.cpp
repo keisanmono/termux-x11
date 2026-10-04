@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#include "focus_notification.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
@@ -55,6 +56,9 @@ static struct {
 static JNIEnv *guienv = NULL; // Must be used only in GUI thread.
 static jobject globalThiz = NULL;
 static Renderer g_renderer;
+// Owned and accessed only by the Android main thread, like conn_fd here.
+static int focus_fd = -1;
+static uintptr_t focus_generation = 0;
 
 static jclass FindClassOrDie(JNIEnv *env, const char* name) {
     jclass clazz = env->FindClass(name);
@@ -119,6 +123,55 @@ static jboolean requestConnection(__unused JNIEnv *env, __unused jclass clazz) {
 }
 
 static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd);
+
+static void closeFocus() {
+    ++focus_generation;
+    if (focus_fd != -1) {
+        ALooper_removeFd(ALooper_forThread(), focus_fd);
+        close(focus_fd);
+        focus_fd = -1;
+    }
+}
+
+static int focusCallback(int fd, int events, void* data) {
+    if (fd != focus_fd || reinterpret_cast<uintptr_t>(data) != focus_generation)
+        return 1; // An old callback must not affect a replacement connection.
+
+    auto result = focus_notification::ReadResult::empty;
+    if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP))
+        result = focus_notification::ReadResult::error;
+    else if (events & ALOOPER_EVENT_INPUT)
+        result = focus_notification::consume(fd);
+    if (result == focus_notification::ReadResult::error) {
+        log(ERROR, "Focus notification channel failed; disconnecting");
+        connect_(nullptr, nullptr, -1);
+        jobject instance = guienv->CallStaticObjectMethod(MainActivity.self, MainActivity.getInstance);
+        if (instance)
+            guienv->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
+        return 0;
+    }
+    if (result == focus_notification::ReadResult::changed)
+        guienv->CallVoidMethod(globalThiz, MainActivity.resetIme);
+    return 1;
+}
+
+// Takes ownership even when registration fails, just like connect_().
+static jboolean connectFocus(__unused JNIEnv* env, __unused jobject cls, jint fd) {
+    closeFocus();
+    if (fd < 0)
+        return JNI_FALSE;
+    int flags = fcntl(fd, F_GETFL);
+    if (conn_fd == -1 || flags == -1 || !(flags & O_NONBLOCK) ||
+            ALooper_addFd(ALooper_forThread(), fd, 0,
+                          ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP,
+                          focusCallback, reinterpret_cast<void*>(focus_generation)) != 1) {
+        close(fd);
+        return JNI_FALSE;
+    }
+    focus_fd = fd;
+    return JNI_TRUE;
+}
+
 static void nativeInit(JNIEnv *env, jobject thiz) {
     JavaVM* vm;
     if (!Charset.self) {
@@ -154,6 +207,7 @@ static int xcallback(int fd, int events, __unused void* data) {
             env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
 
         ALooper_removeFd(ALooper_forThread(), fd);
+        closeFocus();
         close(conn_fd);
         conn_fd = -1;
         g_renderer.setSharedState(NULL);
@@ -236,6 +290,7 @@ static int xcallback(int fd, int events, __unused void* data) {
 }
 
 static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd) {
+    closeFocus();
     if (conn_fd != -1) {
         ALooper_removeFd(ALooper_forThread(), conn_fd);
         close(conn_fd);
@@ -330,6 +385,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                 g_renderer.setFiltering(filtering);
             }},
             {"connect", "(I)V", (void *)&connect_},
+            {"connectFocus", "(I)Z", (void *)&connectFocus},
             {"connected", "()Z", (void *) +[](__unused JNIEnv* env, __unused jclass clazz) -> jboolean {
                 return conn_fd != -1;
             }},

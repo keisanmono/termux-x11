@@ -605,11 +605,17 @@ public class MainActivity extends AppCompatActivity {
             return true;
         }
 
-        try {
-            ParcelFileDescriptor fd = service.getXConnection();
+        // Obtain the focus channel first. An older server must fail here before
+        // we create a control connection that cannot deliver IME invalidations.
+        try (ParcelFileDescriptor focusFd = service.getFocusEventFd();
+             ParcelFileDescriptor fd = focusFd != null ? service.getXConnection() : null) {
+            if (focusFd == null)
+                throw new IllegalStateException("Server has no focus notification channel");
             if (fd != null) {
                 Log.v("MainActivity", "Extracting X connection socket.");
                 LorieView.connect(fd.detachFd());
+                if (!LorieView.connectFocus(focusFd.detachFd()))
+                    throw new IllegalStateException("Could not register focus notification channel");
                 finishStartupDraw();
                 getLorieView().triggerCallback();
                 clientConnectedStateChanged();
@@ -618,6 +624,7 @@ public class MainActivity extends AppCompatActivity {
                 handler.postDelayed(this::tryConnect, 250);
         } catch (Exception e) {
             Log.e("MainActivity", "Something went wrong while we were establishing connection", e);
+            LorieView.connect(-1);
             service = null;
 
             handler.postDelayed(this::tryConnect, 250);

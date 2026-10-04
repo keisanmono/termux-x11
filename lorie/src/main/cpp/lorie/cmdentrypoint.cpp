@@ -30,12 +30,16 @@ extern "C" {
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#include "focus_notification.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
 static int argc = 0;
 static char** argv = nullptr;
 __LIBC_HIDDEN__ volatile int conn_fd = -1; // The only variable shared with activity code.
+// Created before the X server thread starts and retained until process exit.
+// Binder exports duplicates; UI reconnects never close or reuse this writer FD.
+static int focus_event_fd = -1;
 extern DeviceIntPtr lorieMouse, lorieTouch, lorieKeyboard, loriePen, lorieEraser;
 extern ScreenPtr pScreenPtr;
 extern "C" int ucs2keysym(long ucs);
@@ -193,6 +197,11 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, __unused jclass cls, jobjec
     if (access(XkbBaseDirectory, F_OK) != 0) {
         log(ERROR, "%s is unaccessible: %s\n", XkbBaseDirectory, strerror(errno));
         printf("%s is unaccessible: %s\n", XkbBaseDirectory, strerror(errno));
+        return JNI_FALSE;
+    }
+
+    if (focus_event_fd == -1 && (focus_event_fd = focus_notification::create()) == -1) {
+        log(ERROR, "Could not create focus notification eventfd: %s", strerror(errno));
         return JNI_FALSE;
     }
 
@@ -493,10 +502,27 @@ void lorieUnregisterBuffer(LorieBuffer* buffer) {
 }
 
 extern "C" void DDXNotifyFocusChanged(void) {
-    if (conn_fd != -1) {
-        lorieEvent e = { .type = EVENT_WINDOW_FOCUS_CHANGED };
-        write(conn_fd, &e, sizeof(e));
-    }
+    if (conn_fd != -1 && !focus_notification::notify(focus_event_fd))
+        log(ERROR, "Could not notify focus change: %s", strerror(errno));
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_termux_x11_CmdEntryPoint_getFocusEventFd(JNIEnv *env, __unused jobject cls) {
+    if (focus_event_fd == -1)
+        return nullptr;
+    jclass clazz = env->FindClass("android/os/ParcelFileDescriptor");
+    if (!clazz)
+        return nullptr;
+    jmethodID adoptFd = env->GetStaticMethodID(clazz, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
+    if (!adoptFd)
+        return nullptr;
+    int fd = focus_notification::duplicate(focus_event_fd);
+    if (fd == -1)
+        return nullptr;
+    jobject result = env->CallStaticObjectMethod(clazz, adoptFd, fd);
+    if (!result)
+        close(fd);
+    return result;
 }
 
 extern "C" JNIEXPORT jobject JNICALL

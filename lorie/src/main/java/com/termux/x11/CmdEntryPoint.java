@@ -166,6 +166,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static native boolean start(String[] args);
     public native ParcelFileDescriptor getXConnection();
     public native ParcelFileDescriptor getLogcatOutput();
+    public native ParcelFileDescriptor getFocusEventFd();
     private static native boolean connected();
     private native void listenForConnections();
 
