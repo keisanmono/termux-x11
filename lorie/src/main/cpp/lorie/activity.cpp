@@ -148,7 +148,9 @@ static int focusCallback(int fd, int events, void* data) {
         jobject instance = guienv->CallStaticObjectMethod(MainActivity.self, MainActivity.getInstance);
         if (instance)
             guienv->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
-        return 0;
+        // The old registration was explicitly removed above. Java can reconnect
+        // synchronously and reuse its FD number; do not remove that new request.
+        return 1;
     }
     if (result == focus_notification::ReadResult::changed)
         guienv->CallVoidMethod(globalThiz, MainActivity.resetIme);
