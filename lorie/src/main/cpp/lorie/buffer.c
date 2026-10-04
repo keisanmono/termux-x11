@@ -455,8 +455,12 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
             return;
         }
     } else if (buffer.desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
-        if (__builtin_available(android 26, *))
-            if (AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer)) return;
+        // Never retain the sender's process-local pointer on EOF/error.
+        buffer.desc.buffer = NULL;
+        if (__builtin_available(android 26, *)) {
+            if (AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer) ||
+                !buffer.desc.buffer) return;
+        } else return;
     }
 
 #pragma clang diagnostic push

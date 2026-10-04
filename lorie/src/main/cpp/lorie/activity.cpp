@@ -15,7 +15,6 @@
 #include <linux/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
-#include <vector>
 #include "lorie.h"
 #include "focus_notification.h"
 #include "control_io.h"
@@ -228,18 +227,22 @@ static int xcallback(int fd, int events, void* data) {
                     if (!e.clipboardSend.count)
                         break;
                     if (e.clipboardSend.count > 4 * 1024 * 1024) return disconnect();
-                    std::vector<char> clipboard(e.clipboardSend.count + 1);
-                    if (control_recv_all(fd, clipboard.data(), e.clipboardSend.count)) return disconnect();
+                    char* clipboard = static_cast<char*>(calloc(e.clipboardSend.count + 1, 1));
+                    if (!clipboard) return disconnect();
+                    if (control_recv_all(fd, clipboard, e.clipboardSend.count)) {
+                        free(clipboard); return disconnect();
+                    }
                     clipboard[e.clipboardSend.count] = 0;
-                    log(DEBUG, "Clipboard content (%zu symbols) is %s", strlen(clipboard.data()), clipboard.data());
+                    log(DEBUG, "Clipboard content (%zu symbols) is %s", strlen(clipboard), clipboard);
                     jmethodID id = env->GetMethodID(env->GetObjectClass(thiz), "setClipboardText","(Ljava/lang/String;)V");
-                    jobject bb = env->NewDirectByteBuffer(clipboard.data(), strlen(clipboard.data()));
+                    jobject bb = env->NewDirectByteBuffer(clipboard, strlen(clipboard));
                     jobject charset = env->CallStaticObjectMethod(Charset.self, Charset.forName, env->NewStringUTF("UTF-8"));
                     jobject cb = env->CallObjectMethod(charset, Charset.decode, bb);
                     env->DeleteLocalRef(bb);
 
                     jstring str = (jstring) env->CallObjectMethod(cb, CharBuffer.toString);
                     env->CallVoidMethod(thiz, id, str);
+                    free(clipboard);
                     break;
                 }
                 case EVENT_CLIPBOARD_REQUEST: {
