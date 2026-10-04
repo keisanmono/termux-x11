@@ -38,7 +38,8 @@ void lorieRecheckGpuCopies(void);
 void lorieChoreographerFrameCallback(__unused long t, AChoreographer* d);
 void lorieActivityConnected(void);
 void lorieSendSharedServerState(int memfd);
-void lorieRegisterBuffer(LorieBuffer* buffer);
+// Enqueues registration; true only once its complete handle is sent.
+bool lorieRegisterBuffer(LorieBuffer* buffer);
 void lorieUnregisterBuffer(LorieBuffer* buffer);
 bool lorieConnectionAlive(void);
 extern bool lorieDebugEnabled; // Set in activity.cpp's startLogcat, only called when TERMUX_X11_DEBUG=1.

@@ -24,6 +24,7 @@
 #include <android/sharedmem.h>
 #include "list.h"
 #include "buffer.h"
+#include "control_io.h"
 
 // libEGL exports this only since API 26, weak so the library still loads below that.
 __attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
@@ -367,6 +368,47 @@ __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {
     return ret;
 }
 
+struct LorieBufferTransfer { struct LorieBuffer wire; };
+
+LorieBufferTransfer* LorieBufferTransfer_create(LorieBuffer* buffer) {
+    if (!buffer || (buffer->desc.type != LORIEBUFFER_FD &&
+                    buffer->desc.type != LORIEBUFFER_AHARDWAREBUFFER)) return NULL;
+    LorieBufferTransfer* t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    // Keep the existing wire layout, but never share mutable list/GL state.
+    t->wire.desc = buffer->desc;
+    t->wire.size = buffer->size;
+    t->wire.offset = buffer->offset;
+    t->wire.refcount = 1;
+    t->wire.fd = -1;
+    if (buffer->desc.type == LORIEBUFFER_FD) {
+        t->wire.fd = fcntl(buffer->fd, F_DUPFD_CLOEXEC, 0);
+        if (t->wire.fd < 0) { free(t); return NULL; }
+    } else {
+        if (__builtin_available(android 26, *))
+            AHardwareBuffer_acquire(t->wire.desc.buffer);
+        else { free(t); return NULL; }
+    }
+    return t;
+}
+
+int LorieBufferTransfer_send(LorieBufferTransfer* t, int fd) {
+    if (control_send_all(fd, &t->wire, sizeof(t->wire))) return -1;
+    if (t->wire.desc.type == LORIEBUFFER_FD) return ancil_send_fd(fd, t->wire.fd);
+    if (__builtin_available(android 26, *))
+        return AHardwareBuffer_sendHandleToUnixSocket(t->wire.desc.buffer, fd);
+    return -1;
+}
+
+void LorieBufferTransfer_free(LorieBufferTransfer* t) {
+    if (!t) return;
+    if (t->wire.fd >= 0) close(t->wire.fd);
+    if (t->wire.desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
+        if (__builtin_available(android 26, *)) AHardwareBuffer_release(t->wire.desc.buffer);
+    }
+    free(t);
+}
+
 __LIBC_HIDDEN__ void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd) {
     if (socketFd < 0 || !buffer)
         return;
@@ -393,7 +435,8 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
     buffer.lockedData = NULL;
     __sync_fetch_and_add(&buffer.refcount, 1); // refcount is the first object in the struct
 
-    read(socketFd, &buffer, sizeof(buffer));
+    if (outBuffer) *outBuffer = NULL;
+    if (control_recv_all(socketFd, &buffer, sizeof(buffer))) return;
     buffer.image = NULL; // Only for process-local use
     if (buffer.desc.type == LORIEBUFFER_FD) {
         size_t size = buffer.desc.stride * buffer.desc.height * sizeof(uint32_t);
@@ -413,7 +456,7 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
         }
     } else if (buffer.desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
         if (__builtin_available(android 26, *))
-            AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer);
+            if (AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer)) return;
     }
 
 #pragma clang diagnostic push
@@ -553,7 +596,9 @@ __LIBC_HIDDEN__ int ancil_send_fd(int sock, int fd) {
     ((int*) CMSG_DATA(cmsg))[0] = fd;
 #pragma clang diagnostic pop
 
-    return sendmsg(sock, &message_header, 0) >= 0 ? 0 : -1;
+    ssize_t sent;
+    do { sent = sendmsg(sock, &message_header, MSG_NOSIGNAL); } while (sent < 0 && errno == EINTR);
+    return sent == 1 ? 0 : -1;
 }
 
 __LIBC_HIDDEN__ int ancil_recv_fd(int sock) {

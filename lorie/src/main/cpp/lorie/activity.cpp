@@ -15,8 +15,10 @@
 #include <linux/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <vector>
 #include "lorie.h"
 #include "focus_notification.h"
+#include "control_io.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
@@ -199,41 +201,39 @@ static void nativeInit(JNIEnv *env, jobject thiz) {
     connect_(NULL, NULL, -1);
 }
 
-static int xcallback(int fd, int events, __unused void* data) {
+static uintptr_t connectionGeneration = 0;
+
+static int xcallback(int fd, int events, void* data) {
+    if (fd != conn_fd || (uintptr_t)data != connectionGeneration) return 1;
     JNIEnv *env = guienv;
     jobject thiz = globalThiz;
 
-    if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) {
+    auto disconnect = [&] {
+        // Remove old registrations before Java, which can reconnect synchronously.
+        connect_(nullptr, nullptr, -1);
         jobject instance = env->CallStaticObjectMethod(MainActivity.self, MainActivity.getInstance);
-        if (instance)
-            env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
-
-        ALooper_removeFd(ALooper_forThread(), fd);
-        closeFocus();
-        close(conn_fd);
-        conn_fd = -1;
-        g_renderer.setSharedState(NULL);
-        g_renderer.removeAllBuffers();
-        log(DEBUG, "disconnected");
+        if (instance) env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
         return 1;
-    }
+    };
+    if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) return disconnect();
 
     if (conn_fd != -1) {
         lorieEvent e = {0};
 
         again:
-        if (read(conn_fd, &e, sizeof(e)) == sizeof(e)) {
+        if (control_recv_all(fd, &e, sizeof(e))) return disconnect();
+        {
             switch(e.type) {
                 case EVENT_CLIPBOARD_SEND: {
                     if (!e.clipboardSend.count)
                         break;
-                    char clipboard[e.clipboardSend.count + 1];
-                    memset(clipboard, 0, e.clipboardSend.count + 1);
-                    read(conn_fd, clipboard, sizeof(clipboard));
+                    if (e.clipboardSend.count > 4 * 1024 * 1024) return disconnect();
+                    std::vector<char> clipboard(e.clipboardSend.count + 1);
+                    if (control_recv_all(fd, clipboard.data(), e.clipboardSend.count)) return disconnect();
                     clipboard[e.clipboardSend.count] = 0;
-                    log(DEBUG, "Clipboard content (%zu symbols) is %s", strlen(clipboard), clipboard);
+                    log(DEBUG, "Clipboard content (%zu symbols) is %s", strlen(clipboard.data()), clipboard.data());
                     jmethodID id = env->GetMethodID(env->GetObjectClass(thiz), "setClipboardText","(Ljava/lang/String;)V");
-                    jobject bb = env->NewDirectByteBuffer(clipboard, strlen(clipboard));
+                    jobject bb = env->NewDirectByteBuffer(clipboard.data(), strlen(clipboard.data()));
                     jobject charset = env->CallStaticObjectMethod(Charset.self, Charset.forName, env->NewStringUTF("UTF-8"));
                     jobject cb = env->CallObjectMethod(charset, Charset.decode, bb);
                     env->DeleteLocalRef(bb);
@@ -250,8 +250,7 @@ static int xcallback(int fd, int events, __unused void* data) {
                     struct lorie_shared_server_state* state = NULL;
                     int stateFd = ancil_recv_fd(conn_fd);
 
-                    if (stateFd < 0)
-                        break;
+                    if (stateFd < 0) return disconnect();
 
                     state = (struct lorie_shared_server_state*) mmap(NULL, sizeof(*state), PROT_READ|PROT_WRITE, MAP_SHARED, stateFd, 0);
                     if (!state || state == MAP_FAILED) {
@@ -265,9 +264,10 @@ static int xcallback(int fd, int events, __unused void* data) {
                     break;
                 }
                 case EVENT_ADD_BUFFER: {
-                    static LorieBuffer* buffer = NULL;
+                    LorieBuffer* buffer = NULL;
                     const LorieBuffer_Desc* desc;
                     LorieBuffer_recvHandleFromUnixSocket(conn_fd, &buffer);
+                    if (!buffer) return disconnect();
                     desc = LorieBuffer_description(buffer);
                     log(INFO, "Received shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
                     g_renderer.addBuffer(buffer);
@@ -283,8 +283,9 @@ static int xcallback(int fd, int events, __unused void* data) {
             }
         }
 
+        if (fd != conn_fd || (uintptr_t)data != connectionGeneration) return 1;
         int n;
-        if (ioctl(conn_fd, FIONREAD, &n) >= 0 && n > sizeof(e))
+        if (ioctl(fd, FIONREAD, &n) >= 0 && n >= sizeof(e))
             goto again;
     }
 
@@ -292,6 +293,7 @@ static int xcallback(int fd, int events, __unused void* data) {
 }
 
 static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd) {
+    ++connectionGeneration;
     closeFocus();
     if (conn_fd != -1) {
         ALooper_removeFd(ALooper_forThread(), conn_fd);
@@ -302,7 +304,7 @@ static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd) {
     }
 
     if ((conn_fd = fd) != -1) {
-        ALooper_addFd(ALooper_forThread(), fd, 0, ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP, xcallback, NULL);
+        ALooper_addFd(ALooper_forThread(), fd, 0, ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP, xcallback, (void*)connectionGeneration);
 
         // Give the X server our renderer wakeup cond var fd, resent on every reconnect.
         lorieEvent e = { .type = EVENT_RENDERER_WAKEUP_COND };

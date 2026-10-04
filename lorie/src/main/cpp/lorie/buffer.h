@@ -159,6 +159,13 @@ int LorieBuffer_unlock(LorieBuffer* _Nullable buffer);
  * @param buffer
  * @param socketFd
  */
+// Immutable transport snapshot; owns a dup FD or an AHardwareBuffer reference.
+// Creating it is X-thread-only. Sending/freeing it never touches X/GL objects.
+typedef struct LorieBufferTransfer LorieBufferTransfer;
+LorieBufferTransfer* _Nullable LorieBufferTransfer_create(LorieBuffer* _Nonnull buffer);
+int LorieBufferTransfer_send(LorieBufferTransfer* _Nonnull transfer, int fd);
+void LorieBufferTransfer_free(LorieBufferTransfer* _Nullable transfer);
+
 void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd);
 
 /**

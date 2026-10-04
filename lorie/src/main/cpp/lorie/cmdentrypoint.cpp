@@ -7,6 +7,8 @@
 #ifdef HAVE_DIX_CONFIG_H
 #include <dix-config.h>
 #endif
+#include "control_writer.h"
+#include <unordered_map>
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -49,6 +51,33 @@ char *xtrans_unix_path_x11 = nullptr;
 char *xtrans_unix_dir_x11 = nullptr;
 
 struct xorg_list registeredBuffers;
+static control::Writer controlWriter(+[](const char* reason) { log(ERROR, "Control writer disconnected: %s", reason); });
+static std::unordered_map<unsigned long, std::shared_ptr<std::atomic<bool>>> bufferTransfers;
+static std::atomic<uintptr_t> controlGeneration{0};
+
+// X-server-thread-only: worker never accesses conn_fd or this intrusive list.
+static void disconnectControl() {
+    ++controlGeneration;
+    controlWriter.disconnect();
+    if (conn_fd != -1) {
+        InputThreadUnregisterDev(conn_fd);
+        close(conn_fd);
+        conn_fd = -1;
+    }
+    bufferTransfers.clear();
+    lorieEnableClipboardSync(FALSE);
+    LorieBuffer* buffer;
+    while ((buffer = LorieBufferList_first(&registeredBuffers)))
+        LorieBuffer_removeFromList(buffer);
+}
+
+static control::Message controlMessage(const lorieEvent& event) {
+    control::Message m;
+    const auto* p = reinterpret_cast<const unsigned char*>(&event);
+    m.bytes.assign(p, p + sizeof(event));
+    return m;
+}
+
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, __unused jclass cls, jobjectArray args) {
@@ -211,6 +240,7 @@ Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, __unused jclass cls, jobjec
     // Trigger it first time
     AChoreographer_postFrameCallback(choreographer, (AChoreographer_frameCallback) lorieChoreographerFrameCallback, choreographer);
 
+    if (!controlWriter.start()) return JNI_FALSE;
     xorg_list_init(&registeredBuffers);
     pthread_create(&t, nullptr, +[](__unused void* cookie) -> void* {
         exit(dix_main(argc, (char**) argv, (char*[]) { nullptr }));
@@ -252,24 +282,28 @@ static Bool handleTouchEvent(__unused ClientPtr pClient, void *closure) {
     return TRUE;
 }
 
-void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
+void handleLorieEvents(int fd, int ready, void *generation) {
     ValuatorMask mask;
     lorieEvent e = {0};
     valuator_mask_zero(&mask);
 
-    if (ready & X_NOTIFY_ERROR) {
-        LorieBuffer* buf;
+    auto disconnect = [&] {
         InputThreadUnregisterDev(fd);
-        close(fd);
-        conn_fd = -1;
-        lorieEnableClipboardSync(FALSE);
-        while ((buf = LorieBufferList_first(&registeredBuffers)))
-            LorieBuffer_removeFromList(buf);
-        return;
-    }
+        auto* token = new std::pair<int, uintptr_t>(fd, (uintptr_t)generation);
+        QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
+            auto* token = static_cast<std::pair<int, uintptr_t>*>(closure);
+            if (conn_fd == token->first && controlGeneration == token->second) disconnectControl();
+            delete token;
+            return TRUE;
+        }, nullptr, token);
+        lorieWakeServer();
+    };
+    if ((uintptr_t)generation != controlGeneration) return;
+    if (ready & X_NOTIFY_ERROR) { disconnect(); return; }
 
     again:
-    if (read(fd, &e, sizeof(e)) == sizeof(e)) {
+    if (control_recv_all(fd, &e, sizeof(e))) { disconnect(); return; }
+    {
         switch(e.type) {
             case EVENT_SCREEN_SIZE: {
                 auto *copy = (lorieEvent*) calloc(1, sizeof(lorieEvent) + e.screenSize.name_size + 1);
@@ -442,63 +476,76 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
 }
 
 void lorieSendClipboardData(const char* data) {
-    if (data && conn_fd != -1) {
-        size_t len = strlen(data);
-        lorieEvent e = { .clipboardSend = { .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t) len } };
-        write(conn_fd, &e, sizeof(e));
-        write(conn_fd, data, len);
+    if (!data || conn_fd == -1) return;
+    size_t len = strlen(data);
+    if (len > control::Writer::maxBytes - sizeof(lorieEvent)) {
+        controlWriter.fail(); return;
     }
+    lorieEvent e = { .clipboardSend = { .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t)len } };
+    auto m = controlMessage(e);
+    m.bytes.insert(m.bytes.end(), data, data + len);
+    controlWriter.enqueue(std::move(m));
 }
 
 void lorieRequestClipboard(void) {
     if (conn_fd != -1) {
         lorieEvent e = { .type = EVENT_CLIPBOARD_REQUEST };
-        write(conn_fd, &e, sizeof(e));
+        controlWriter.enqueue(controlMessage(e));
     }
 }
 
 bool lorieConnectionAlive(void) {
-    if (conn_fd == -1)
-        return false;
-
-    // Check if socket is closed or has errors.
+    if (conn_fd == -1) return false;
     struct pollfd p = { .fd = conn_fd, .events = POLLIN | POLLHUP | POLLERR | POLLRDHUP };
     return !(poll(&p, 1, 0) == 1 && (p.revents & (POLLERR | POLLNVAL | POLLRDHUP | POLLHUP)));
 }
 
 void lorieSendSharedServerState(int memfd) {
-    if (conn_fd != -1) {
-        lorieEvent e = { .type = EVENT_SHARED_SERVER_STATE };
-        write(conn_fd, &e, sizeof(e));
-        ancil_send_fd(conn_fd, memfd);
-    }
+    if (conn_fd == -1) return;
+    int copy = fcntl(memfd, F_DUPFD_CLOEXEC, 0);
+    if (copy < 0) { controlWriter.fail(); return; }
+    auto owned = std::shared_ptr<int>(new int(copy), [](int* f) { close(*f); delete f; });
+    lorieEvent e = { .type = EVENT_SHARED_SERVER_STATE };
+    auto m = controlMessage(e);
+    m.tail = [owned](int fd) { return ancil_send_fd(fd, *owned) == 0; };
+    controlWriter.enqueue(std::move(m));
 }
 
-void lorieRegisterBuffer(LorieBuffer* buffer) {
+bool lorieRegisterBuffer(LorieBuffer* buffer) {
+    if (!buffer || !lorieConnectionAlive()) return false;
     unsigned long id = LorieBuffer_description(buffer)->id;
-    if (conn_fd == -1 || LorieBufferList_findById(&registeredBuffers, id))
-        return; // Already registered
-
-    if (conn_fd != -1 && buffer) {
-        lorieEvent e = { .type = EVENT_ADD_BUFFER };
-        write(conn_fd, &e, sizeof(e));
-        LorieBuffer_sendHandleToUnixSocket(buffer, conn_fd);
-        LorieBuffer_addToList(buffer, &registeredBuffers);
-        const LorieBuffer_Desc* desc = LorieBuffer_description(buffer);
-        log(INFO, "Sent shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
+    if (LorieBufferList_findById(&registeredBuffers, id)) {
+        auto it = bufferTransfers.find(id);
+        return it != bufferTransfers.end() && it->second->load();
     }
+    auto transfer = std::shared_ptr<LorieBufferTransfer>(LorieBufferTransfer_create(buffer), LorieBufferTransfer_free);
+    if (!transfer) { controlWriter.fail(); return false; }
+    lorieEvent e = { .type = EVENT_ADD_BUFFER };
+    auto m = controlMessage(e);
+    m.charge = 1024; // Conservative metadata charge; handle count is bounded by maxMessages.
+    auto sent = std::make_shared<std::atomic<bool>>(false);
+    m.tail = [transfer, sent](int fd) {
+        if (LorieBufferTransfer_send(transfer.get(), fd)) return false;
+        sent->store(true);
+        return true;
+    };
+    if (controlWriter.enqueue(std::move(m))) {
+        bufferTransfers[id] = sent;
+        LorieBuffer_addToList(buffer, &registeredBuffers);
+    }
+    return sent->load();
 }
 
 void lorieUnregisterBuffer(LorieBuffer* buffer) {
-    unsigned long id;
-    if (!buffer || (!LorieBufferList_findById(&registeredBuffers, (id = LorieBuffer_description(buffer)->id))))
-        return;  // Not exist or not registered so no need to unregister
-
-    if (conn_fd != -1 && buffer) {
+    if (!buffer) return;
+    unsigned long id = LorieBuffer_description(buffer)->id;
+    if (!LorieBufferList_findById(&registeredBuffers, id)) return;
+    if (conn_fd != -1) {
         lorieEvent e = { .removeBuffer = { .t = EVENT_REMOVE_BUFFER, .id = id } };
-        write(conn_fd, &e, sizeof(e));
-        LorieBuffer_removeFromList(buffer);
+        controlWriter.enqueue(controlMessage(e));
     }
+    bufferTransfers.erase(id);
+    LorieBuffer_removeFromList(buffer);
 }
 
 extern "C" void DDXNotifyFocusChanged(void) {
@@ -530,10 +577,13 @@ Java_com_termux_x11_CmdEntryPoint_getXConnection(JNIEnv *env, __unused jobject c
     int client[2];
     jclass ParcelFileDescriptorClass = env->FindClass("android/os/ParcelFileDescriptor");
     jmethodID adoptFd = env->GetStaticMethodID(ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
-    socketpair(AF_UNIX, SOCK_STREAM, 0, client);
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, client)) return nullptr;
     QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
-        InputThreadRegisterDev((int) (int64_t) closure, handleLorieEvents, nullptr);
-        conn_fd = (int) (int64_t) closure;
+        disconnectControl();
+        int fd = (int)(intptr_t)closure;
+        if (!controlWriter.connect(fd)) { shutdown(fd, SHUT_RDWR); close(fd); return TRUE; }
+        conn_fd = fd;
+        InputThreadRegisterDev(fd, handleLorieEvents, (void*)controlGeneration.load());
         lorieActivityConnected();
         return TRUE;
     }, nullptr, (void*) (int64_t) client[1]);

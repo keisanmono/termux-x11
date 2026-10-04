@@ -934,7 +934,14 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     }
 
     // Make sure the renderer has (or will have) this texture. Idempotent if already registered.
-    lorieRegisterBuffer(srcBuffer);
+    bool srcSent = lorieRegisterBuffer(srcBuffer);
+    bool dstSent = lorieRegisterBuffer(dstBuffer);
+    if (!srcSent || !dstSent) {
+        // Control messages are asynchronous. Do not publish a GPU copy ahead
+        // of its handles; the caller can perform the regular CPU copy now.
+        gpuCopyAttempts++;
+        return FALSE;
+    }
     // Extra reference: keeps the LorieBuffer struct alive on this side until lorieGpuCopyAck()
     // releases it, independently from the X pixmap's own lifetime.
     LorieBuffer_acquire(srcBuffer);
@@ -947,7 +954,6 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     // still need registering and an extra reference.
     Bool dstIsRoot = dst == pScreenPtr->devPrivate;
     if (!dstIsRoot) {
-        lorieRegisterBuffer(dstBuffer);
         LorieBuffer_acquire(dstBuffer);
         // Tracked so CPU reads of this window's pixmap (e.g. a compositor reading it back to
         // paint) only pay for the GPU lock (see lorieNeedsGpuLock) while a GPU write into it can
@@ -1015,8 +1021,7 @@ Bool loriePresentFlip(__unused RRCrtcPtr crtc, __unused uint64_t event_id, __unu
     if (desc->type != LORIEBUFFER_FD && desc->type != LORIEBUFFER_AHARDWAREBUFFER)
         return FALSE;
 
-    lorieRegisterBuffer(priv->buffer);
-    return TRUE;
+    return lorieRegisterBuffer(priv->buffer);
 }
 
 void loriePresentAfterFlip(__unused RRCrtcPtr crtc, uint64_t event_id, uint64_t ust, uint64_t target_msc, __unused PixmapPtr pixmap) {
