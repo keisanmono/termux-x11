@@ -546,6 +546,7 @@ public class LorieView extends SurfaceView implements InputStub {
 
     @Override
     public boolean dispatchKeyEventPreIme(KeyEvent event) {
+        ArrowKeyTrace.event("preime", event);
         if (imeBuggyKeys.contains(event.getKeyCode())) {
             // IME does not handle/send events for some keys correctly correctly.
             // So we should send key release manually in the case if IME will not send it...
@@ -563,6 +564,7 @@ public class LorieView extends SurfaceView implements InputStub {
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        ArrowKeyTrace.event("dispatch", event);
         if (imeBuggyKeys.contains(event.getKeyCode())) {
             // remove messages we posted in dispatchKeyEventPreIme
             int action = event.getAction();

@@ -216,6 +216,7 @@ public final class InputEventSender {
     }
 
     public boolean sendKeyEvent(KeyEvent e) {
+        com.termux.x11.ArrowKeyTrace.event("sender", e);
         int keyCode = e.getKeyCode();
         boolean pressed = e.getAction() == KeyEvent.ACTION_DOWN;
 

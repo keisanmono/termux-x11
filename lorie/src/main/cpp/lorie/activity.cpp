@@ -18,6 +18,7 @@
 #include "lorie.h"
 #include "focus_notification.h"
 #include "control_io.h"
+#include "arrow_trace.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
@@ -452,7 +453,41 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                 lastInputTimestampMs = nowMs();
                 if (conn_fd != -1) {
                     int code = (scan_code) ?: android_to_linux_keycode[key_code];
-                    sendEvent(.key = { .t = EVENT_KEY, .key = (uint16_t) (code + 8), .state = key_down });
+                    uint64_t trace_ns = r9_arrow_stamp(code + 8);
+                    if (!trace_ns) {
+                        sendEvent(.key = { .t = EVENT_KEY, .key = (uint16_t) (code + 8), .state = key_down });
+                        return true;
+                    }
+                    // Same single write as sendEvent, without retries or altered bytes.
+                    // Capture errno immediately; logging must not replace the write's errno.
+                    lorieEvent e = { .key = { .t = EVENT_KEY, .key = (uint16_t) (code + 8), .state = key_down } };
+                    int entry_errno = errno;
+                    __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                            "stage=jni_enter mono_ns=%llu key=%d scan=%d xkb=%d down=%d fd=%d",
+                            (unsigned long long)trace_ns, key_code, scan_code, code + 8, (int)key_down, conn_fd);
+                    errno = entry_errno;
+                    ssize_t written = write(conn_fd, &e, sizeof(e));
+                    int write_errno = errno;
+                    if (trace_ns) {
+                        struct timespec end = {};
+                        clock_gettime(CLOCK_MONOTONIC, &end);
+                        __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                                "stage=jni_send mono_ns=%llu end_ns=%llu key=%d scan=%d xkb=%d down=%d fd=%d written=%lld expected=%zu error=%d",
+                                (unsigned long long)trace_ns,
+                                (unsigned long long)end.tv_sec * 1000000000ULL + (unsigned long long)end.tv_nsec,
+                                key_code, scan_code, code + 8, (int)key_down, conn_fd,
+                                (long long)written, sizeof(e), written < 0 ? write_errno : 0);
+                    }
+                    errno = write_errno;
+                } else {
+                    int arrow_xkb = scan_code ? scan_code + 8 :
+                            key_code == 19 ? 111 : key_code == 20 ? 116 :
+                            key_code == 21 ? 113 : key_code == 22 ? 114 : 0;
+                    uint64_t trace_ns = r9_arrow_stamp(arrow_xkb);
+                    if (trace_ns)
+                        __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                                "stage=jni_disconnected mono_ns=%llu key=%d scan=%d down=%d fd=-1",
+                                (unsigned long long)trace_ns, key_code, scan_code, (int)key_down);
                 }
                 return true;
             }},

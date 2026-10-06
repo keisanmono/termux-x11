@@ -8,6 +8,7 @@
 #include <dix-config.h>
 #endif
 #include "control_writer.h"
+#include "arrow_trace.h"
 #include <jni.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
@@ -420,9 +421,14 @@ void handleLorieEvents(int fd, int ready, void *generation) {
                 }
                 break;
             }
-            case EVENT_KEY:
+            case EVENT_KEY: {
+                uint64_t trace_ns = r9_arrow_stamp(e.key.key);
+                if (trace_ns)
+                    fprintf(stderr, "R9ArrowTrace stage=x11_receive mono_ns=%llu xkb=%u down=%u\n",
+                            (unsigned long long)trace_ns, (unsigned)e.key.key, (unsigned)e.key.state);
                 QueueKeyboardEvents(lorieKeyboard, e.key.state ? KeyPress : KeyRelease, e.key.key);
                 break;
+            }
             case EVENT_UNICODE: {
                 int ks = ucs2keysym((long) e.unicode.code);
                 __android_log_print(ANDROID_LOG_DEBUG, "LorieNative", "Trying to input keysym %d\n", ks);
