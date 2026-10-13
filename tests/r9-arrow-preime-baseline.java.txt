@@ -1,0 +1,16 @@
+public boolean dispatchKeyEventPreIme(KeyEvent event) {
+        ArrowKeyTrace.event("preime", event);
+        if (imeBuggyKeys.contains(event.getKeyCode())) {
+            // IME does not handle/send events for some keys correctly correctly.
+            // So we should send key release manually in the case if IME will not send it...
+            // I.e. in the case of CTRL+Backspace IME does not send Backspace release event.
+            int action = event.getAction();
+            if (action == KeyEvent.ACTION_UP)
+                keyReleaseHandler.sendEmptyMessageDelayed(event.getKeyCode(), 50);
+        }
+
+        if (hardwareKbdScancodesWorkaround)
+            return false;
+
+        return MainActivity.getInstance().handleKey(event);
+    }

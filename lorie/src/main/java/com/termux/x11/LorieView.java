@@ -37,6 +37,7 @@ import androidx.annotation.NonNull;
 import androidx.core.math.MathUtils;
 
 import com.termux.x11.input.InputStub;
+import com.termux.x11.input.InputEventSender;
 import com.termux.x11.input.TouchInputHandler;
 import com.termux.x11.utils.SamsungDexUtils;
 
@@ -547,6 +548,17 @@ public class LorieView extends SurfaceView implements InputStub {
     @Override
     public boolean dispatchKeyEventPreIme(KeyEvent event) {
         ArrowKeyTrace.event("preime", event);
+        int key = event.getKeyCode();
+        if (hardwareKbdScancodesWorkaround &&
+                (key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN ||
+                 key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) &&
+                InputEventSender.isHardwareKeyboardEvent(event)) {
+            // A physical arrow release can reach pre-IME but be consumed before
+            // ordinary dispatch. Route both edges through the existing handler.
+            // Its consumed result prevents the same event reaching it twice.
+            return MainActivity.getInstance().handleKey(event);
+        }
+
         if (imeBuggyKeys.contains(event.getKeyCode())) {
             // IME does not handle/send events for some keys correctly correctly.
             // So we should send key release manually in the case if IME will not send it...

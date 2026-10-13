@@ -205,7 +205,7 @@ public final class InputEventSender {
     // PoC state is separate from IME/text-key tracking and scoped per device.
     private final Set<Long> hardwarePrintableKeys = new TreeSet<>();
 
-    private static boolean isHardwareKeyboardEvent(KeyEvent e) {
+    public static boolean isHardwareKeyboardEvent(KeyEvent e) {
         InputDevice d = e.getDevice();
         return e.getDeviceId() >= 0 && d != null && !d.isVirtual()
                 && d.getKeyboardType() == InputDevice.KEYBOARD_TYPE_ALPHABETIC

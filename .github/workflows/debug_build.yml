@@ -51,6 +51,9 @@ jobs:
     - name: Fetch submodules
       run: git submodule update --init --recursive --jobs 8 --depth 1
 
+    - name: Physical arrow pre-IME routing tests
+      run: python3 tests/r9-arrow-routing.py
+
     - name: Bounded arrow trace pipe tests
       run: |
         c++ -std=c++17 -Wall -Wextra -Werror -pthread tests/r9-arrow-sink.cc -o /tmp/r9-arrow-sink-test
