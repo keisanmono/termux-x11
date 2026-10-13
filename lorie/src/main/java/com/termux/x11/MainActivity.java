@@ -585,6 +585,16 @@ public class MainActivity extends AppCompatActivity {
                 if (logcatOutput != null)
                     LorieView.startLogcat(logcatOutput.detachFd());
 
+                // Reuse the existing log-fd Binder method, with an independent
+                // pipe so nonblocking trace writes do not alter logcat behavior.
+                // Trace setup failure must not prevent the original connection.
+                if (!ArrowKeyTrace.attached()) {
+                    try {
+                        ParcelFileDescriptor traceOutput = service.getLogcatOutput();
+                        if (traceOutput != null) ArrowKeyTrace.attach(traceOutput.detachFd());
+                    } catch (Exception ignored) { /* diagnostic unavailable */ }
+                }
+
                 tryConnect();
 
                 if (intent != getIntent())

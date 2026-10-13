@@ -51,6 +51,11 @@ jobs:
     - name: Fetch submodules
       run: git submodule update --init --recursive --jobs 8 --depth 1
 
+    - name: Bounded arrow trace pipe tests
+      run: |
+        c++ -std=c++17 -Wall -Wextra -Werror -pthread tests/r9-arrow-sink.cc -o /tmp/r9-arrow-sink-test
+        timeout 5 /tmp/r9-arrow-sink-test
+
     - name: Build
       run: ./gradlew assembleDebug
     - name: Store app-universal-debug

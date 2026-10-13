@@ -1,12 +1,20 @@
 package com.termux.x11;
 
-import android.util.Log;
 import android.view.KeyEvent;
 
 /** Diagnostic branch only: no characters, remapping, injection or retries. */
 public final class ArrowKeyTrace {
     private static long startNs;
     private static int lines;
+    private static boolean attached;
+
+    static boolean attached() { return attached; }
+
+    static void attach(int fd) {
+        attached = LorieView.startArrowTrace(fd);
+        if (attached) LorieView.writeArrowTrace("stage=java_ready mono_ns="
+                + System.nanoTime() + " java_window_start_ns=" + startNs + " java_lines=" + lines);
+    }
 
     private ArrowKeyTrace() {}
 
@@ -28,7 +36,7 @@ public final class ArrowKeyTrace {
     public static void event(String stage, KeyEvent e) {
         long nowNs = System.nanoTime();
         if (!allow(e.getKeyCode(), nowNs)) return;
-        Log.i("R9ArrowTrace", "stage=" + stage + " mono_ns=" + nowNs
+        LorieView.writeArrowTrace("stage=" + stage + " mono_ns=" + nowNs
                 + " key=" + e.getKeyCode() + " scan=" + e.getScanCode()
                 + " action=" + e.getAction() + " flags=" + e.getFlags()
                 + " device=" + e.getDeviceId() + " source=" + e.getSource()

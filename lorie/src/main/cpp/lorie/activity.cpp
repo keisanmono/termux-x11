@@ -19,6 +19,7 @@
 #include "focus_notification.h"
 #include "control_io.h"
 #include "arrow_trace.h"
+#include "arrow_sink.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
@@ -398,6 +399,23 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                 return conn_fd != -1;
             }},
             {"startLogcat", "(I)V", (void *)&startLogcat},
+            {"startArrowTrace", "(I)Z", (void *) +[](__unused JNIEnv* env, __unused jclass cls, jint fd) -> jboolean {
+                if (!r9_sink_attach(fd)) return false;
+                struct timespec now = {};
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                auto& window = r9_arrow_window();
+                r9_tracef("stage=transport_ready mono_ns=%llu jni_window_start_ns=%llu jni_lines=%u",
+                        (unsigned long long)now.tv_sec * 1000000000ULL + now.tv_nsec,
+                        (unsigned long long)window.start_ns, window.lines);
+                return true;
+            }},
+            {"writeArrowTrace", "(Ljava/lang/String;)V", (void *) +[](JNIEnv* env, __unused jclass cls, jstring message) {
+                if (!message) return;
+                const char* text = env->GetStringUTFChars(message, nullptr);
+                if (!text) { env->ExceptionClear(); return; } // diagnostics cannot abort key routing
+                r9_tracef("%s", text);
+                env->ReleaseStringUTFChars(message, text);
+            }},
             {"setClipboardSyncEnabled", "(ZZ)V", (void *) +[](__unused JNIEnv* env, __unused jobject cls, jboolean enable, __unused jboolean ignored) {
                 sendEvent(.clipboardEnable = { .t = EVENT_CLIPBOARD_ENABLE, .enable = enable });
             }},
@@ -462,7 +480,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                     // Capture errno immediately; logging must not replace the write's errno.
                     lorieEvent e = { .key = { .t = EVENT_KEY, .key = (uint16_t) (code + 8), .state = key_down } };
                     int entry_errno = errno;
-                    __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                    r9_tracef(
                             "stage=jni_enter mono_ns=%llu key=%d scan=%d xkb=%d down=%d fd=%d",
                             (unsigned long long)trace_ns, key_code, scan_code, code + 8, (int)key_down, conn_fd);
                     errno = entry_errno;
@@ -471,7 +489,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                     if (trace_ns) {
                         struct timespec end = {};
                         clock_gettime(CLOCK_MONOTONIC, &end);
-                        __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                        r9_tracef(
                                 "stage=jni_send mono_ns=%llu end_ns=%llu key=%d scan=%d xkb=%d down=%d fd=%d written=%lld expected=%zu error=%d",
                                 (unsigned long long)trace_ns,
                                 (unsigned long long)end.tv_sec * 1000000000ULL + (unsigned long long)end.tv_nsec,
@@ -485,7 +503,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                             key_code == 21 ? 113 : key_code == 22 ? 114 : 0;
                     uint64_t trace_ns = r9_arrow_stamp(arrow_xkb);
                     if (trace_ns)
-                        __android_log_print(ANDROID_LOG_INFO, "R9ArrowTrace",
+                        r9_tracef(
                                 "stage=jni_disconnected mono_ns=%llu key=%d scan=%d down=%d fd=-1",
                                 (unsigned long long)trace_ns, key_code, scan_code, (int)key_down);
                 }

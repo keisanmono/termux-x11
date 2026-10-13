@@ -18,9 +18,14 @@ static inline bool r9_arrow_allow(struct R9ArrowTraceWindow* window, int key, ui
     return true;
 }
 
+static inline R9ArrowTraceWindow& r9_arrow_window() {
+    static R9ArrowTraceWindow window = {};
+    return window;
+}
+
 static inline uint64_t r9_arrow_stamp(int key) {
     if (key != 111 && key != 113 && key != 114 && key != 116) return 0;
-    static struct R9ArrowTraceWindow window = {};
+    auto& window = r9_arrow_window();
     struct timespec t;
     if (clock_gettime(CLOCK_MONOTONIC, &t) != 0) return 0;
     uint64_t now = (uint64_t)t.tv_sec * UINT64_C(1000000000) + (uint64_t)t.tv_nsec;
